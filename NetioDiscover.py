@@ -1,58 +1,104 @@
+import logging
+from collections import namedtuple
+from typing import Iterable, List
 import netifaces
-import sys
-from socket import *
+import socket
 
-class NetioDiscover:
-    def __init__(self, interface=None):
+SEND_PORT = 62386
+SEND_DATA = b'\x01\xec\x00'
+RECV_PORT = 62387
+
+
+class NetioDiscover(object):
+
+    Interface = namedtuple('Interface', 'addr netmask broadcast')
+
+    def __init__(self, interfaces=None):
+        """
+        :param interfaces: list of interface names to use for discovery
+        """
+
+        self.log = logging.getLogger('discover')
         self.devices = []
-        if interface is None:
-            self.interfaces = netifaces.interfaces()
-        else:
-            self.interfaces = interface
+
+        self.interfaces = list(self._get_ifaddresses(only=interfaces))
         print(self.interfaces)
 
-    def getDevicesLinux(self, timeout=1):
+    @staticmethod
+    def _get_ifaddresses(only: List[str] = None) -> Iterable[Interface]:
         """
-        Discover NETIO devices on all available network interfaces.
-        Listen for defined timeout at avery interface and return Dictionary with found NETIO devices.
-        Specific method for Linux operating system.
+        Get information about all accessible network interfaces.
+
+        :param only: get addresses only of these NICs. e.g. 'eth0', ...
+        :return: list of all available addresses for all provided NICs
         """
-        self.devices=[]
-        outsocket = socket(AF_INET, SOCK_DGRAM)
-        outsocket.setsockopt(SOL_SOCKET, SO_BROADCAST, 1)
-        outsocket.setsockopt(SOL_SOCKET, SO_REUSEADDR, 1)
-        outsocket.bind(('', 62386))
-        outsocket.settimeout(timeout)
-
-        for keys in self.interfaces:
-            try:
-                print("sending to: %s" % keys)
-                outsocket.setsockopt(SOL_SOCKET, 25, str(keys + '\0').encode('utf-8'))  # this is used to send and receive on all interfaces - need root privileges
-                if sys.version_info[0] < 3:
-                    outsocket.sendto("01ec00".decode("hex"), ('255.255.255.255', 62387))
-                else:
-                    outsocket.sendto(bytes.fromhex("01ec00"), ('255.255.255.255', 62387))
-            except:
-                print('Unable to send request')
-
-            try:
-                while True:
-                    self.devices.append(self.parseDeviceInfo(outsocket.recvfrom(1024)[0]))
-            except:
+        for iface in netifaces.interfaces():
+            if only is not None and iface not in only:
                 continue
 
-        outsocket.close()
+            addresses = netifaces.ifaddresses(iface)
+            for nic in addresses.get(netifaces.AF_INET, []):
+                yield NetioDiscover.Interface(**nic)
+
+    def discover_devices(self, timeout=3):
+        """
+        Discover NETIO devices on all available network interfaces.
+        Listen for defined timeout at interfaces specified in __init__ and return Dictionary with all found devices.
+        """
+        self.devices.clear()
+
+        # Todo parallelize this
+
+        for iface in self.interfaces:
+            print(f'polling {iface}')
+            devs = self._find_devices_on_interface(iface, timeout=timeout)
+            self.devices += list(devs)
 
         return self.devices
 
+    # backwards compatibility
+    getDevicesLinux = discover_devices
 
-    def parseDeviceInfo(self, data):
+    @staticmethod
+    def _find_devices_on_interface(interface: Interface, timeout=1) -> Iterable[dict]:
+
+        # prepare the listener
+        listener = socket.socket(socket.AF_INET, socket.SOCK_DGRAM, socket.IPPROTO_UDP)  # listen on UDP
+        if hasattr(socket, 'SO_REUSEPORT'):
+            listener.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEPORT, 1)
+        # listener.setsockopt(socket.SOL_SOCKET, socket.SO_BROADCAST, 1)
+        listener.bind((interface.addr, RECV_PORT))
+        listener.settimeout(timeout)
+
+        # send the discover broadcast
+        sender = socket.socket(socket.AF_INET, socket.SOCK_DGRAM, socket.IPPROTO_UDP)
+        if hasattr(socket, 'SO_REUSEPORT'):
+            sender.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEPORT, 1)
+        sender.setsockopt(socket.SOL_SOCKET, socket.SO_BROADCAST, 1)
+        sender.sendto(SEND_DATA, (interface.broadcast, SEND_PORT))
+        sender.close()
+
+        # receive data
+        while True:
+            try:
+                data, addr = listener.recvfrom(1024)
+            except socket.timeout:
+                break
+            print(data, addr)
+            if not data:
+                break
+            yield NetioDiscover.parseDeviceInfo(data)
+
+        listener.close()
+
+    @staticmethod
+    def parseDeviceInfo(data):
         """
         Parse NETIO Device information from data payload
         """
         binarydata = bytearray(data)
 
-        if binarydata[0] is not 2:
+        if binarydata[0] != 2:
             print('Data are not valid')
             return
         else:
@@ -124,3 +170,13 @@ class NetioDiscover:
                 continue
 
         return device
+
+
+def discover_all(only: List[str] = None):
+    nd = NetioDiscover(only)
+    return nd.discover_devices(5)
+
+
+if __name__ == '__main__':
+    for idx, device in enumerate(discover_all()):
+        print(f'({idx}): ', device)
