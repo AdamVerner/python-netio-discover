@@ -4,9 +4,9 @@ from typing import Iterable, List
 import netifaces
 import socket
 
-SEND_PORT = 62386
+SEND_PORT = 62387
 SEND_DATA = b'\x01\xec\x00'
-RECV_PORT = 62387
+RECV_PORT = 62386
 
 
 class NetioDiscover(object):
@@ -15,24 +15,28 @@ class NetioDiscover(object):
 
     def __init__(self, interfaces=None):
         """
-        :param interfaces: list of interface names to use for discovery
+        :param interfaces: list of interface names to use for discovery, interface name in Linux, GUID on windows.
         """
 
         self.log = logging.getLogger('discover')
         self.devices = []
 
         self.interfaces = list(self._get_ifaddresses(only=interfaces))
-        print(self.interfaces)
+        print(*self.interfaces, sep='\n')
 
     @staticmethod
     def _get_ifaddresses(only: List[str] = None) -> Iterable[Interface]:
         """
         Get information about all accessible network interfaces.
 
+        On windows the only parameter takes GUID instead of interface name.
+
         :param only: get addresses only of these NICs. e.g. 'eth0', ...
         :return: list of all available addresses for all provided NICs
         """
         for iface in netifaces.interfaces():
+
+            # TODO we could use registry entries to get usable names on windows
             if only is not None and iface not in only:
                 continue
 
@@ -50,7 +54,7 @@ class NetioDiscover(object):
         # Todo parallelize this
 
         for iface in self.interfaces:
-            print(f'polling {iface}')
+            logging.info(f'polling {iface}')
             devs = self._find_devices_on_interface(iface, timeout=timeout)
             self.devices += list(devs)
 
@@ -61,14 +65,22 @@ class NetioDiscover(object):
 
     @staticmethod
     def _find_devices_on_interface(interface: Interface, timeout=1) -> Iterable[dict]:
+        """
+        Generator containing all devices found on specified interface.
+        Device is specified as dict returned by parseDeviceInfo.
+
+        :param interface: named tuple containing addr and broadcast.
+        :param timeout: time to wait for device response.
+        :return: generator containing all devices found. The devices are added to generator as they're discovered.
+        """
 
         # prepare the listener
         listener = socket.socket(socket.AF_INET, socket.SOCK_DGRAM, socket.IPPROTO_UDP)  # listen on UDP
         if hasattr(socket, 'SO_REUSEPORT'):
             listener.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEPORT, 1)
-        # listener.setsockopt(socket.SOL_SOCKET, socket.SO_BROADCAST, 1)
-        listener.bind((interface.addr, RECV_PORT))
         listener.settimeout(timeout)
+        listener.bind((interface.addr, RECV_PORT))
+        logging.debug(f'listener bound to {(interface.addr, RECV_PORT)}')
 
         # send the discover broadcast
         sender = socket.socket(socket.AF_INET, socket.SOCK_DGRAM, socket.IPPROTO_UDP)
@@ -77,6 +89,7 @@ class NetioDiscover(object):
         sender.setsockopt(socket.SOL_SOCKET, socket.SO_BROADCAST, 1)
         sender.sendto(SEND_DATA, (interface.broadcast, SEND_PORT))
         sender.close()
+        logging.debug(f'magic packet sent to {(interface.broadcast, SEND_PORT)}')
 
         # receive data
         while True:
@@ -84,7 +97,7 @@ class NetioDiscover(object):
                 data, addr = listener.recvfrom(1024)
             except socket.timeout:
                 break
-            print(data, addr)
+            logging.debug(f'received packet from "{addr}: "{data}"')
             if not data:
                 break
             yield NetioDiscover.parseDeviceInfo(data)
@@ -174,9 +187,9 @@ class NetioDiscover(object):
 
 def discover_all(only: List[str] = None):
     nd = NetioDiscover(only)
-    return nd.discover_devices(5)
+    return nd.discover_devices(1)
 
 
 if __name__ == '__main__':
     for idx, device in enumerate(discover_all()):
-        print(f'({idx}): ', device)
+        print(f'({idx}):', device)
