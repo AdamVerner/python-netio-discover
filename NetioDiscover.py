@@ -3,6 +3,7 @@ from collections import namedtuple
 from typing import Iterable, List
 import netifaces
 import socket
+from multiprocessing.pool import ThreadPool
 
 SEND_PORT = 62387
 SEND_DATA = b'\x01\xec\x00'
@@ -42,6 +43,9 @@ class NetioDiscover(object):
 
             addresses = netifaces.ifaddresses(iface)
             for nic in addresses.get(netifaces.AF_INET, []):
+                # skip localhost
+                if nic.get('addr') == '127.0.0.1':
+                    continue
                 yield NetioDiscover.Interface(**nic)
 
     def discover_devices(self, timeout=3):
@@ -51,12 +55,19 @@ class NetioDiscover(object):
         """
         self.devices.clear()
 
-        # Todo parallelize this
+        def worker(interface):
+            logging.info(f'polling {interface}')
+            devs = list(self._find_devices_on_interface(interface, timeout=timeout))
+            self.devices += devs
+            logging.info(f'found {len(devs)} devices on  "{interface}"')
+
+        pool = ThreadPool()
 
         for iface in self.interfaces:
-            logging.info(f'polling {iface}')
-            devs = self._find_devices_on_interface(iface, timeout=timeout)
-            self.devices += list(devs)
+            pool.apply_async(worker, (iface, ))
+
+        pool.close()
+        pool.join()
 
         return self.devices
 
@@ -191,5 +202,8 @@ def discover_all(only: List[str] = None):
 
 
 if __name__ == '__main__':
+
+    logging.basicConfig(level=logging.INFO)
+
     for idx, device in enumerate(discover_all()):
         print(f'({idx}):', device)
