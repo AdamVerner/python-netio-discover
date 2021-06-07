@@ -4,6 +4,7 @@ from typing import Iterable, List
 import netifaces
 import socket
 from multiprocessing.pool import ThreadPool
+import pprint
 
 SEND_PORT = 62387
 SEND_DATA = b'\x01\xec\x00'
@@ -57,7 +58,7 @@ class NetioDiscover(object):
 
         def worker(interface):
             logging.info(f'polling {interface}')
-            devs = list(self._find_devices_on_interface(interface, timeout=timeout))
+            devs = list(self.find_devices_on_interface(interface, timeout=timeout))
             self.devices += devs
             logging.info(f'found {len(devs)} devices on  "{interface}"')
 
@@ -75,7 +76,7 @@ class NetioDiscover(object):
     getDevicesLinux = discover_devices
 
     @staticmethod
-    def _find_devices_on_interface(interface: Interface, timeout=1) -> Iterable[dict]:
+    def find_devices_on_interface(interface: Interface, timeout=1) -> Iterable[dict]:
         """
         Generator containing all devices found on specified interface.
         Device is specified as dict returned by parseDeviceInfo.
